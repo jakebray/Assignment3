@@ -6,15 +6,14 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.util.HashSet;
-import java.util.Map;
 
 public class WorkerThread extends Thread {
 
 	// number of times a packet will be resent if it times out
-	private static final int MAX_TRIES = 3;
+	private static final int MAX_TRIES = 5;
 
 	// determines how long thread will wait to receive ack
-	private static final long NUM_MILLIS_TILL_TIMEOUT = 10000;
+	private static final long NUM_MILLIS_TILL_TIMEOUT = 5000;
 
 	private DatagramPacket rxPacket;
 	private DatagramSocket socket;
@@ -52,6 +51,11 @@ public class WorkerThread extends Thread {
 			return;
 		}
 
+		if (payload.startsWith("QUIT")) {
+			onQUITRequest(payload);
+			return;
+		}
+		
 		if (payload.startsWith("ACK")) {
 			onACKRequest(payload);
 			return;
@@ -170,10 +174,35 @@ public class WorkerThread extends Thread {
 		
 		while(!(PubSubServer.clientEndPoints.get(senderID).messageQueue.isEmpty())) {
 			String nextMessage = PubSubServer.clientEndPoints.get(senderID).messageQueue.peek();
-			sendAndAck(senderID, nextMessage);
-			PubSubServer.clientEndPoints.get(senderID).messageQueue.poll();
+			if(sendAndAck(senderID, nextMessage)) {
+				PubSubServer.clientEndPoints.get(senderID).messageQueue.poll();
+			} else {
+				// client must be temporarily disconnected
+				return;
+			}
 		}
 		sendAndAck(senderID, "EMPTY\n");
+	}
+	
+	private void onQUITRequest(String payload) {
+		String reqMessage = getRequestMessage("QUIT", payload);
+		String[] tokens = reqMessage.split(" ");
+		int senderID = Integer.parseInt(tokens[0]);
+		String groupName = tokens[1];
+
+		// if sender doesn't have an ID (isn't registered)
+		if (!(PubSubServer.clientEndPoints.containsKey(senderID))) {
+			onBadRequest(payload);
+			return;
+		}
+		
+		updateClientInfo(senderID);
+		
+		// remove this sender from the group
+		PubSubServer.groups.get(groupName).remove(senderID);
+
+		// send message, and print error if ack not received
+		sendAndAck(senderID, "QUIT Group " + groupName + "\n");
 	}
 	
 	private void onACKRequest(String payload) {
@@ -188,6 +217,8 @@ public class WorkerThread extends Thread {
 	}
 
 	private void onSHUTDOWNRequest(String payload) {
+		int senderID = Integer.parseInt(getRequestMessage("SHUTDOWN", payload));
+		sendAndAck(senderID, "SHUTTING DOWN\n");
 		socket.close();
 	}
 

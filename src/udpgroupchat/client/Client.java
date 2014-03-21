@@ -53,8 +53,17 @@ public class Client {
 			System.out.println("\nJack receiving messages: ");
 			pollAndReceive(jackID, "POLL" + stringJackID);
 			
-			sendAndReceive(jackID, "SHUTDOWN");
+			System.out.println("\nJack quitting ChatRoom group: ");
+			sendAndReceive(jackID, "QUIT" + stringJackID + "ChatRoom");
 			
+			System.out.println("\nJill sending a message to the group: ");
+			sendAndReceive(jillID, "MSG" + stringJillID + "ChatRoom Are you still there?");
+			
+			System.out.println("\nJack receiving messages (should be empty because he left ChatRoom): ");
+			pollAndReceive(jackID, "POLL" + stringJackID);
+			
+			System.out.println("\nJack telling server to SHUTDOWN: ");
+			sendAndReceive(jackID, "SHUTDOWN " + jackID);
 		} catch (IOException e) {
 			// we jump out here if there's an error
 			e.printStackTrace();
@@ -117,16 +126,17 @@ public class Client {
 				senderID = ID;
 			}
 			
-			// print the payload
-			if(str.equals("EMPTY")) {
-				break;
-			}
+			// print payload
 			System.out.println(str);
 			
 			message = "ACK " + senderID;
 			txPacket = new DatagramPacket(message.getBytes(), message.length(),
 					serverSocketAddress);
 			socket.send(txPacket);
+
+			if(str.equals("EMPTY")) {
+				break;
+			}
 		}
 	}
 

@@ -37,7 +37,12 @@ public class WorkerThread extends Thread {
 
 		// these requests all require ID's
 		if (payload.startsWith("JOIN")) {
-			onJoinRequest(payload);
+			onJOINRequest(payload);
+			return;
+		}
+		
+		if (payload.startsWith("FIND")) {
+			onFINDRequest(payload);
 			return;
 		}
 
@@ -100,7 +105,7 @@ public class WorkerThread extends Thread {
 		}
 	}
 
-	private void onJoinRequest(String payload) {
+	private void onJOINRequest(String payload) {
 		String reqMessage = getRequestMessage("JOIN", payload);
 		String[] tokens = reqMessage.split(" ");
 		int senderID = Integer.parseInt(tokens[0]);
@@ -125,6 +130,29 @@ public class WorkerThread extends Thread {
 		// send message, and print error if ack not received
 		sendAndAck(senderID, "JOINED " + groupName + "\n");
 	}
+	
+	private void onFINDRequest(String payload) {
+		int senderID = Integer.parseInt(getRequestMessage("FIND", payload));
+
+		// if sender doesn't have an ID (isn't registered)
+		if (!(PubSubServer.clientEndPoints.containsKey(senderID))) {
+			onBadRequest(payload);
+			return;
+		}
+		
+		updateClientInfo(senderID);
+
+		// this getRoom() method will make the appropriate sendAndAcks
+		String groupName = getRoom(senderID);
+		
+		// if group doesn't yet exist
+		if (!(PubSubServer.groups.containsKey(groupName))) {
+			// create new group, add to groups map
+			PubSubServer.groups.put(groupName, new HashSet<Integer>());
+		}
+		// add this sender to the group
+		PubSubServer.groups.get(groupName).add(senderID);
+	}
 
 	private void onMSGRequest(String payload) {
 		String reqMessage = getRequestMessage("MSG", payload);
@@ -147,9 +175,9 @@ public class WorkerThread extends Thread {
 			builder.append(" ");
 			builder.append(tokens[i]);
 		}
-		String message = "From <"
-				+ PubSubServer.clientEndPoints.get(senderID).name + "> To <"
-				+ groupName + "> " + builder.toString() + "\n";
+		String message = "From "
+				+ PubSubServer.clientEndPoints.get(senderID).name + " To "
+				+ groupName + " " + builder.toString() + "\n";
 		
 		for(Integer receiverID : PubSubServer.groups.get(groupName)) {
 			// add the message to each group member's messageQueue
@@ -157,7 +185,7 @@ public class WorkerThread extends Thread {
 				PubSubServer.clientEndPoints.get(receiverID).messageQueue.add(message);
 			}
 		}
-		sendAndAck(senderID, "MSG <" + builder.toString() + "> Sent to Group <" + groupName + ">\n");
+		sendAndAck(senderID, "MSG " + builder.toString() + " Sent to Group " + groupName + ">\n");
 	}
 
 	private void onPOLLRequest(String payload) {
@@ -200,6 +228,10 @@ public class WorkerThread extends Thread {
 		
 		// remove this sender from the group
 		PubSubServer.groups.get(groupName).remove(senderID);
+		// if this makes the group empty, then remove it
+		if (PubSubServer.groups.get(groupName).isEmpty()) {
+			PubSubServer.groups.remove(groupName);
+		}
 
 		// send message, and print error if ack not received
 		sendAndAck(senderID, "QUIT Group " + groupName + "\n");
@@ -208,11 +240,13 @@ public class WorkerThread extends Thread {
 	private void onACKRequest(String payload) {
 		int senderID = Integer.parseInt(getRequestMessage("ACK", payload));
 		// mark ack as received
-		PubSubServer.acksReceived.put(senderID, true);
-		// notify the waiting thread that the ack was received
-		WorkerThread thread = PubSubServer.acks.get(senderID);
-		synchronized (thread) {
-			thread.notify();
+		if (PubSubServer.acks.containsKey(senderID)) {
+			PubSubServer.acksReceived.put(senderID, true);
+			// notify the waiting thread that the ack was received
+			WorkerThread thread = PubSubServer.acks.get(senderID);
+			synchronized (thread) {
+				thread.notify();
+			}
 		}
 	}
 
@@ -238,16 +272,61 @@ public class WorkerThread extends Thread {
 		return payload.substring(request.length() + 1, payload.length()).trim();
 	}
 
+	// keeps track of clients waiting for another to join room
+	private String getRoom(int senderID) {
+		synchronized (PubSubServer.waitingClientGroup) {
+			String roomName;
+			// if there is currently a waiting client, then match this client to it, notify the waiter, and remove it from the wait list
+			if (PubSubServer.isClientWaiting) {
+				// note: hashCode() returns the CLient's ID
+				// if waiter and sender both accept FOUND messages, then pair them up
+				String foundMsg = "FOUND " + PubSubServer.waitingClientGroup + "\n";
+				if (sendAndAck(PubSubServer.waitingClient.hashCode(), foundMsg) && sendAndAck(senderID, foundMsg)) {
+					PubSubServer.isClientWaiting = false;
+					roomName = PubSubServer.waitingClientGroup;
+				} else {
+					// if no response from waiter, remove the waiter from the group
+					PubSubServer.groups.get(PubSubServer.waitingClientGroup).remove(senderID);
+					// if this makes the group empty, then remove it
+					if (PubSubServer.groups.get(PubSubServer.waitingClientGroup).isEmpty()) {
+						PubSubServer.groups.remove(PubSubServer.waitingClientGroup);
+					}
+					// note: calls sendAndAck
+					roomName = genRoom(senderID);
+				}
+			} else {
+				// note: calls sendAndAck
+				roomName = genRoom(senderID);
+			}
+			return roomName;
+		}
+	}
+	
+	// keeps track of clients waiting for another to join room
+	private String genRoom(int senderID) {
+		synchronized (PubSubServer.waitingClientGroup) {
+			// generate a string in the form "roomX", where X is a unique number
+			// then update variables to add this room to the wait list
+			String roomName = "room" + PubSubServer.roomID.incrementAndGet();
+			PubSubServer.isClientWaiting = true;
+			PubSubServer.waitingClientGroup = roomName;
+			PubSubServer.waitingClient = PubSubServer.clientEndPoints.get(senderID);
+			sendAndAck(senderID, "WAITING\n");
+			return roomName;
+		}
+	}
+
 	private boolean sendAndAck(int senderID, String message) {
 		boolean ackReceived = false;
+		
+		// add this thread to the collection of threads waiting on acks
+		PubSubServer.acks.put(senderID, this);
+		PubSubServer.acksReceived.put(senderID, false);
+		
 		for (int i = 0; i < MAX_TRIES; i++) {
 			try {
 				send(message, PubSubServer.clientEndPoints.get(senderID).address,
 						PubSubServer.clientEndPoints.get(senderID).port);
-
-				// add this thread to the collection of threads waiting on acks
-				PubSubServer.acks.put(senderID, this);
-				PubSubServer.acksReceived.put(senderID, false);
 
 				synchronized (this) {
 					try {
@@ -270,6 +349,11 @@ public class WorkerThread extends Thread {
 		if (!(ackReceived)) {
 			System.out.println("Client failed to acknowledge " + message);
 		}
+		// remove this thread from the collection of threads waiting on acks
+		PubSubServer.acks.remove(senderID);
+		PubSubServer.acksReceived.remove(senderID);
+		
+		// return whether or not the ack was ever received
 		return ackReceived;
 	}
 	

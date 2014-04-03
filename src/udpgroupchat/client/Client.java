@@ -33,6 +33,7 @@ public class Client {
 			System.out.println("\nJill registering: ");
 			jillID = sendAndReceive(0, "NAME Jill");
 			
+			// surround IDs with spaces for ease of reading the following code
 			String stringJackID = " " + jackID + " ";
 			String stringJillID = " " + jillID + " ";
 			
